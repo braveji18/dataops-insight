@@ -1,0 +1,24 @@
+{
+  "$comment": "lakehouse-lab 조작 명령 허용. 랩을 파괴하는 reset.sh / down.sh --purge 는 일부러 빼서 매번 확인받게 둔다.",
+  "permissions": {
+    "allow": [
+      "Bash(bin/status.sh:*)",
+      "Bash(bin/up.sh:*)",
+      "Bash(bin/down.sh)",
+      "Bash(bin/seed.sh:*)",
+      "Bash(bin/q.sh:*)",
+      "Bash(bin/bench.sh:*)",
+      "Bash(scripts/testenv/bin/status.sh:*)",
+      "Bash(scripts/testenv/bin/up.sh:*)",
+      "Bash(scripts/testenv/bin/seed.sh:*)",
+      "Bash(scripts/testenv/bin/q.sh:*)",
+      "Bash(scripts/testenv/bin/bench.sh:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker info:*)",
+      "Bash(docker inspect:*)",
+      "Bash(docker compose ps:*)",
+      "Bash(docker compose logs:*)",
+      "Bash(docker compose config:*)"
+    ]
+  }
+}
