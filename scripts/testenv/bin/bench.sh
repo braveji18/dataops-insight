@@ -11,11 +11,14 @@
 #   * 두 엔진 각각에 대해 SELECT 1 왕복시간을 측정해 CLI/접속 오버헤드를 함께 기록
 #   * 결과는 벽시계 시간이다. CLI 기동 + 접속 오버헤드가 포함되므로 짧은 쿼리일수록
 #     overhead_ms 대비 비율을 함께 봐야 한다
-#   * 호스트 지문(arch/cpu/mem)과 이미지 digest 를 매 결과에 박는다 —
-#     다른 머신의 숫자를 무심코 비교하는 사고를 막기 위해서다
+#   * 호스트 지문(arch/cpu/mem), 이미지 digest, hive 변형을 매 결과에 박는다 —
+#     다른 조건의 숫자를 무심코 비교하는 사고를 막기 위해서다
 #
-# ★ arm64(Apple Silicon) 주의: StarRocks BE 는 x86 에서 AVX2/AVX512, arm 에서 NEON 경로를
-#   탄다. arm64 랩의 절대값을 x86 운영 판단 근거로 쓰지 말 것.
+# ★ 결과 해석 시 주의:
+#   - arm64(Apple Silicon)에서 StarRocks BE 는 NEON, x86 에서는 AVX2/AVX512 경로를 탄다.
+#     arm64 랩의 절대값을 x86 운영 판단 근거로 쓰지 말 것.
+#   - hive 3 은 amd64 단독 이미지라 arm64 호스트에서 에뮬레이션으로 돈다(결과의
+#     hive.emulated=true). HMS 왕복이 포함된 시간은 그만큼 부풀려진 값이다.
 
 . "$(cd "$(dirname "$0")" && pwd)/common.sh"
 lab_load_env
@@ -78,6 +81,11 @@ median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{print (NR%2==1)? a
 printf '{\n' > "$OUT"
 printf '  "label": "%s",\n  "timestamp_utc": "%s",\n' "$LABEL" "$STAMP" >> "$OUT"
 printf '  "profile": "%s",\n  "tpch_scale": "%s",\n' "$LAB_PROFILE" "$TPCH_SCHEMA" >> "$OUT"
+# hive 변형은 성능 해석에 직결된다 — hive 3 은 arm64 호스트에서 에뮬레이션으로 돌기 때문에
+# HMS 왕복이 포함된 시간이 부풀려진다. 결과 파일만 보고 구분할 수 있어야 한다.
+printf '  "hive": {"version": "%s", "platform": "%s", "emulated": %s},\n' \
+  "$HIVE_VERSION" "$HMS_PLATFORM" \
+  "$([ "$HMS_PLATFORM" = "$(lab_host_platform)" ] && echo false || echo true)" >> "$OUT"
 printf '  "warmup": %s,\n  "repeat": %s,\n' "$WARMUP" "$REPEAT" >> "$OUT"
 printf '  "host": {"os": "%s", "arch": "%s", "docker_cpus": %s, "docker_mem_bytes": %s},\n' \
   "$HOST_OS" "$HOST_ARCH" "$DOCKER_CPUS" "$DOCKER_MEM" >> "$OUT"

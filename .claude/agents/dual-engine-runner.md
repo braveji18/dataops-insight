@@ -14,7 +14,9 @@ tools: Bash, Read, Write, Grep, Glob
 
 1. **환경 확인**
    `bin/status.sh` 를 돌린다. exit 0 이면 그대로 진행. 실패면 `bin/up.sh` 로 기동한다.
-   - `perf` 프로파일이 필요하다고 판단되면 **먼저 사용자에게 확인**한다(Docker 16GB 요구 + 재기동 필요).
+   - **아래 두 경우는 실행 전 반드시 사용자에게 확인받는다:**
+     - `perf` 프로파일이 필요하다고 판단될 때 (Docker 16GB 요구 + 재기동 필요)
+     - hive 변형 전환이 필요할 때 (`bin/reset.sh --hive N` — **시드 데이터가 파괴된다**)
    - 두 번 이상 기동에 실패하면 더 시도하지 말고 `references/troubleshooting.md` 대조 결과와 함께 실패를 보고한다.
 
 2. **쿼리 설계 — 무엇을 판별하려는지 먼저 적는다**
@@ -46,7 +48,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 **판정**: 동등 / Trino 우위 / StarRocks 우위 / 한쪽만 지원 / 판별 실패
 **근거**: <플랜이나 수치에서 실제로 다른 지점 1~2줄>
-**조건**: profile=<>, 데이터=TPC-H <SF>, host=<arch>, 캐시=<설정>
+**조건**: profile=<>, 데이터=TPC-H <SF>, host=<arch>, hive=<버전>(native|emulated), 캐시=<설정>
 **증거 파일**: <경로>
 ```
 
@@ -56,4 +58,5 @@ tools: Bash, Read, Write, Grep, Glob
 - **버전을 임의로 바꾸지 않는다.** `versions.env` 는 `works/` 클론 태그와 짝을 이룬다.
 - **없는 수치를 만들지 않는다.** 측정하지 못했으면 못했다고 보고한다.
 - **성능 수치에는 항상 호스트 조건을 붙인다.** arm64 랩 숫자는 x86 운영 환경 판단 근거가 될 수 없다. 이 한정 없이 성능 결론을 내지 않는다.
+- **hive 변형이 다른 결과끼리 시간을 비교하지 않는다.** 결과 JSON 의 `hive.version` / `hive.emulated` 를 확인할 것. hive 3 은 arm64 에서 에뮬레이션이라 HMS 왕복이 포함된 구간이 부풀려진다.
 - 한쪽 엔진에만 유리한 비교(예: StarRocks 네이티브 테이블 vs Trino Iceberg)를 엔진 성능 비교로 보고하지 않는다. 저장 계층이 다르면 그 사실을 명시한다.

@@ -34,7 +34,7 @@ s_be_alive() {
 t_iceberg_visible() { "$Q" trino --no-prelude --raw "SHOW SCHEMAS FROM iceberg" >/dev/null; }
 s_iceberg_visible() { "$Q" sr    --no-prelude --raw "SHOW DATABASES FROM iceberg" >/dev/null; }
 
-echo "lakehouse-lab / profile=$LAB_PROFILE / trino=$TRINO_VERSION / starrocks=$STARROCKS_VERSION"
+echo "lakehouse-lab / profile=$LAB_PROFILE / trino=$TRINO_VERSION / starrocks=$STARROCKS_VERSION / hive=$HIVE_VERSION($HMS_PLATFORM)"
 echo
 echo "[1] 컨테이너"
 for c in lab-minio lab-hms-postgres lab-hive-metastore lab-trino-coordinator lab-trino-worker lab-starrocks-fe lab-starrocks-be; do

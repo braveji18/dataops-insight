@@ -38,7 +38,9 @@ SQL="$(sed "s/@TPCH@/${TPCH_SCHEMA}/g" "$LAB_ROOT/sql/seed/tpch-iceberg.sql.tmpl
 
 # Trino CLI 는 --execute 로 여러 구문을 받지만, 실패 지점을 알려면 한 줄씩 돌리는 편이 낫다.
 # (파이프 대신 파일 리다이렉션 — 파이프의 while 은 서브셸이라 실패 시 exit 가 먹지 않는다)
-TMP_SQL="$(mktemp -t lab-seed)"
+# mktemp: BSD(macOS)는 -t 접두어에 접미사를 자동으로 붙이지만 GNU coreutils 는
+# 템플릿에 X 가 3개 이상 있어야 한다. 양쪽에서 동작하는 형태로 고정한다.
+TMP_SQL="$(mktemp "${TMPDIR:-/tmp}/lab-seed.XXXXXX")"
 trap 'rm -f "$TMP_SQL"' EXIT
 printf '%s\n' "$SQL" | grep -E '^(CREATE|ANALYZE)' > "$TMP_SQL"
 while IFS= read -r stmt; do

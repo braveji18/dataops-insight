@@ -16,7 +16,7 @@ MinIO(S3) ← Hive Metastore(+PostgreSQL) ← 동일한 Iceberg 카탈로그 (�
 ## 원칙 — 이 파일을 읽는 AI가 지켜야 할 것
 
 1. **compose 파일이나 설정을 새로 생성하지 않는다.** 환경 자산은 `scripts/testenv/` 에 이미 검증된 상태로 있다. 매번 생성하면 재현성이 깨진다. 필요한 건 실행뿐이다.
-2. **버전을 임의로 바꾸지 않는다.** `scripts/testenv/versions.env` 가 유일한 버전 소스이고, `works/` 의 클론 태그와 반드시 짝을 이룬다. 어긋나면 런타임 증거가 코드 인용을 검증하지 못한다.
+2. **버전을 임의로 바꾸지 않는다.** 버전 소스는 두 곳이다 — 비교 대상(Trino/StarRocks)은 `scripts/testenv/versions.env`, HMS 는 `scripts/testenv/hive/hive3.env` \| `hive4.env`. `versions.env` 는 `works/` 의 클론 태그와 반드시 짝을 이룬다. 어긋나면 런타임 증거가 코드 인용을 검증하지 못한다.
 3. **green 판정은 `bin/status.sh` 의 exit code 로만 한다.** 로그를 보고 "잘 뜬 것 같다"고 판단하지 않는다.
 4. **성능 수치를 인용할 때는 반드시 호스트 조건을 함께 적는다.** arm64 랩 숫자는 x86 운영 환경으로 이전 불가다.
 
@@ -28,6 +28,7 @@ MinIO(S3) ← Hive Metastore(+PostgreSQL) ← 동일한 Iceberg 카탈로그 (�
 |---|---|
 | 기동 (기능 검증용, 기본) | `bin/up.sh` |
 | 기동 (성능 비교용, Docker 16GB↑) | `bin/up.sh perf` |
+| 기동 (Hive Metastore 3.1.3 변형) | `bin/up.sh --hive 3` |
 | 상태 확인 — **exit 0 이면 실험 가능** | `bin/status.sh` |
 | 쿼리 (Trino) | `bin/q.sh trino "SELECT ..."` |
 | 쿼리 (StarRocks) | `bin/q.sh sr "SELECT ..."` |
@@ -35,7 +36,20 @@ MinIO(S3) ← Hive Metastore(+PostgreSQL) ← 동일한 Iceberg 카탈로그 (�
 | 시드 재적재 | `bin/seed.sh [--force] [--with-native]` |
 | 성능 비교 | `bin/bench.sh --label q1 -f q.sql` |
 | 종료 (데이터 유지) | `bin/down.sh` |
-| 완전 초기화 | `bin/reset.sh` |
+| 완전 초기화 / **hive 변형 전환** | `bin/reset.sh [profile] [--hive N]` |
+
+## 구성의 두 축: 프로파일 × Hive 변형
+
+서로 독립이라 조합해서 쓴다. 기본값은 `functional` + `hive 4`.
+
+| | 값 | 무엇이 달라지는가 |
+|---|---|---|
+| 프로파일 | `functional`(SF 0.01, 8GB) / `perf`(SF 1, 16GB) | 데이터 규모와 컨테이너 자원 |
+| Hive 변형 | `4`(4.0.1, 멀티아치) / `3`(3.1.3, amd64 단독) | HMS 버전. 실무에 남아 있는 Hive 3 계열 동작 확인용 |
+
+**★ hive 변형 전환은 `up.sh` 로 안 된다.** Hive 3/4 는 metastore 스키마 버전이 달라(3.1.0 vs 4.0.0) 같은 볼륨을 공유할 수 없다. `up.sh` 가 전환을 감지하면 거부하고 `reset.sh` 를 안내한다. **reset 은 시드 데이터를 파괴하므로 실행 전 사용자에게 확인받는다.**
+
+arm64 호스트에서 hive 3 은 에뮬레이션으로 돈다. 기능 검증에는 문제없지만, HMS 왕복이 포함된 시간(플랜 생성, 첫 쿼리 지연)을 성능 근거로 쓰지 않는다. 자세한 것은 `references/protocol.md`.
 
 `q.sh` 의 출력은 양쪽 엔진 모두 **TSV + 헤더**로 통일돼 있어 그대로 diff 할 수 있다.
 기본 카탈로그/스키마는 `iceberg` / `bench`. `system.runtime.*`, `SHOW BACKENDS` 처럼 카탈로그 지정이 방해되는 쿼리는 `--no-prelude` 를 붙인다.

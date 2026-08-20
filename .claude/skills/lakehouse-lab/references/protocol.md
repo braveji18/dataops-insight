@@ -19,6 +19,18 @@
 - **warm-up 1회 + 측정 3회, 중앙값**. 첫 실행은 메타데이터 로딩·JIT·캐시 채우기가 섞여 있어 버린다.
 - **오버헤드 기준선**: 매 측정마다 각 엔진에 `SELECT 1`을 던져 CLI/접속 왕복시간을 함께 기록한다. 100ms대 쿼리는 이 값과 같은 자릿수라 그대로 비교하면 안 된다.
 - **호스트 지문 기록**: OS/arch/Docker CPU·메모리/이미지 digest가 결과 JSON에 항상 박힌다. 다른 머신 결과와 섞어 비교하지 않기 위한 안전장치다.
+- **hive 변형 기록**: 결과 JSON의 `hive` 필드에 버전·플랫폼·에뮬레이션 여부가 함께 박힌다.
+
+### hive 변형이 시간에 미치는 영향
+
+hive 3(3.1.3)은 amd64 단독 이미지라 **arm64 호스트에서는 에뮬레이션으로 돈다**(`hive.emulated=true`). HMS 왕복이 포함된 구간은 그만큼 부풀려진 값이다.
+
+| 측정 대상 | hive 3 결과를 써도 되는가 |
+|---|---|
+| 스캔·조인·집계 등 실행 시간 | ✅ 데이터 IO 는 엔진이 직접 하므로 HMS 와 무관 |
+| 플랜 생성 시간, 첫 쿼리 지연, 메타데이터 조회 | ❌ HMS 왕복이 섞인다 |
+
+**hive 변형이 다른 결과끼리 시간을 비교하지 않는다.** 비교하려면 같은 변형에서 다시 잰다.
 
 ## 2. 캐시 통제
 
@@ -63,7 +75,7 @@ SELECT ...
 동등 / Trino 우위 / StarRocks 우위 / 한쪽만 지원 / 판별 실패(이유)
 
 ### 조건
-profile=functional, TPC-H SF0.01, host=darwin/arm64, 캐시=기본값
+profile=functional, TPC-H SF0.01, host=darwin/arm64, hive=4.0.1(native), 캐시=기본값
 ```
 
 `docs/evidence/<축>/<날짜>-<probe>.md` 에 저장하고, `docs/` 본문에서 이 파일을 링크한다.
@@ -73,5 +85,6 @@ profile=functional, TPC-H SF0.01, host=darwin/arm64, 캐시=기본값
 
 - 한쪽 엔진에만 유리한 SQL로 비교하기 (예: StarRocks 네이티브 테이블 vs Trino Iceberg — 이건 저장 계층이 다른 것이지 엔진 비교가 아니다)
 - 워커 수가 다른 상태에서 비교하기 (Trino worker 1 : StarRocks BE 1 을 유지할 것)
+- **hive 변형이 다른 결과끼리 시간 비교하기** (결과 JSON 의 `hive.version` 을 확인할 것)
 - `perf` 프로파일 없이 잰 수치를 성능 결론으로 쓰기
 - 결과 JSON 없이 대화에서 본 숫자를 `docs/`에 옮기기

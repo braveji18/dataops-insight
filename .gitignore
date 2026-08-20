@@ -25,7 +25,7 @@ Gemfile.lock
 /works
 
 # 테스트 환경(lakehouse-lab) 생성물
-# .env 는 versions.env + profiles/*.env 로부터 up.sh 가 만든다 — 원본만 커밋한다.
+# .env 는 versions.env + hive/*.env + profiles/*.env 로부터 up.sh 가 만든다 — 원본만 커밋한다.
 /scripts/testenv/.env
 /scripts/testenv/results/
 

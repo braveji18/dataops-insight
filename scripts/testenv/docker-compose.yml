@@ -5,8 +5,12 @@
 #                     ↑                              ↑
 #            Trino coordinator + worker      StarRocks FE + BE
 #
-# 이 파일을 직접 실행하지 말 것. bin/up.sh 가 versions.env + profiles/*.env 를
-# .env 로 합성한 뒤 실행한다(프로파일별 메모리/데이터 규모가 달라지므로).
+# 이 파일을 직접 실행하지 말 것. bin/up.sh 가 versions.env + hive/hive<N>.env +
+# profiles/*.env 를 .env 로 합성한 뒤 실행한다.
+#
+# ★ 버전 분기를 이 파일에 두지 않는다. Hive 3/4 차이는 전부 conf/hms/hms-entrypoint.sh 가
+#   흡수하고, compose 와 metastore-site.xml 은 두 변형에서 완전히 동일하게 유지된다.
+#   분기가 여러 파일로 번지는 순간 "동일 조건 비교"라는 전제가 깨지기 때문이다.
 # =============================================================================
 name: lakehouse-lab
 
@@ -78,11 +82,17 @@ services:
       context: ./conf/hms
       args:
         HIVE_BASE_IMAGE: ${HIVE_BASE_IMAGE}
+        HIVE_MAJOR: ${HIVE_VARIANT}
         CURL_IMAGE: ${CURL_IMAGE}
         HADOOP_AWS_VERSION: ${HADOOP_AWS_VERSION}
         AWS_SDK_BUNDLE_VERSION: ${AWS_SDK_BUNDLE_VERSION}
         POSTGRES_JDBC_VERSION: ${POSTGRES_JDBC_VERSION}
-    image: lakehouse-lab/hive-metastore:${HADOOP_AWS_VERSION}
+    # 이미지 태그에 hive 버전을 포함시킨다. hadoop-aws 버전만으로 태그를 만들면
+    # 변형을 오갈 때 엉뚱한 이미지가 재사용될 수 있다.
+    image: lakehouse-lab/hive-metastore:${HIVE_VERSION}-hadoop${HADOOP_AWS_VERSION}
+    # hive/hive3.env 는 linux/amd64 고정(arm64 매니페스트 없음),
+    # hive/hive4.env 는 멀티아치라 up.sh 가 호스트 아키텍처를 채운다.
+    platform: ${HMS_PLATFORM}
     container_name: lab-hive-metastore
     hostname: hive-metastore
     depends_on:
@@ -95,6 +105,10 @@ services:
       DB_DRIVER: postgres
       HIVE_CUSTOM_CONF_DIR: /hive_custom_conf
       HADOOP_HEAPSIZE: 512
+      # entrypoint 가 HADOOP_CLIENT_OPTS 에 "-Xmx1G $SERVICE_OPTS" 를 붙인다.
+      # SERVICE_OPTS 가 뒤에 오므로 여기서 준 -Xmx 가 최종값이 된다.
+      # 이걸 비워 두면 힙 1G > mem_limit 이 되어 컨테이너가 조용히 SIGKILL 된다.
+      SERVICE_OPTS: -Xmx${HMS_HEAP}
     volumes:
       - ./conf/hms/metastore-site.xml:/hive_custom_conf/metastore-site.xml:ro
     ports:
@@ -197,6 +211,9 @@ services:
       - |
         ulimit -n 65535 || true
         cat /overrides/be.conf >> /opt/starrocks/be/conf/be.conf
+        # BE 자체 메모리 상한. 프로파일 값이라 파일이 아니라 여기서 주입한다
+        # (be.conf 는 정적 파일이라 환경변수 치환이 안 된다). 반드시 mem_limit 보다 작아야 한다.
+        echo "mem_limit = ${SR_BE_MEM_LIMIT}" >> /opt/starrocks/be/conf/be.conf
         until mysql -h starrocks-fe -P9030 -uroot -e "SELECT 1" >/dev/null 2>&1; do
           echo "waiting for FE..."; sleep 2
         done
