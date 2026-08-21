@@ -18,4 +18,16 @@ _site/
 Gemfile.lock
 
 
+# 개인 권한 설정 (.claude/settings.json 은 팀 공유용이라 커밋한다)
+.claude/settings.local.json
+
+# 업스트림 소스 클론 (Trino / StarRocks)
 /works
+
+# 테스트 환경(lakehouse-lab) 생성물
+# .env 는 versions.env + hive/*.env + profiles/*.env 로부터 up.sh 가 만든다 — 원본만 커밋한다.
+/scripts/testenv/.env
+/scripts/testenv/results/
+
+# 실행 증거 원문(로그·EXPLAIN 원문). 요약은 docs/evidence/ 로 커밋한다.
+/scripts/testenv/tmp/

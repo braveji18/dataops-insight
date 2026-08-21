@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  Hive Metastore 설정 — Trino 와 StarRocks 가 공유하는 단 하나의 카탈로그.
+  자격증명은 랩 고정값(minio/minio123). 바꾸려면 versions.env 주석의 4개 파일을 함께 수정할 것.
+-->
+<configuration>
+
+  <!-- 백엔드 DB -->
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:postgresql://hms-postgres:5432/metastore</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>org.postgresql.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>hive</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>hive</value>
+  </property>
+
+  <!-- Metastore 본체 -->
+  <property>
+    <name>metastore.thrift.port</name>
+    <value>9083</value>
+  </property>
+  <property>
+    <name>metastore.warehouse.dir</name>
+    <value>s3a://lakehouse/warehouse</value>
+  </property>
+  <property>
+    <name>metastore.expression.proxy</name>
+    <value>org.apache.hadoop.hive.metastore.DefaultPartitionExpressionProxy</value>
+  </property>
+  <property>
+    <name>metastore.task.threads.always</name>
+    <value>org.apache.hadoop.hive.metastore.events.EventCleanerTask</value>
+  </property>
+  <!-- Iceberg 는 파일 IO 를 엔진(Trino/StarRocks)이 직접 한다. HMS 는 메타데이터
+       포인터만 관리하면 되므로 스키마 검증을 느슨하게 둔다. -->
+  <property>
+    <name>metastore.schema.verification</name>
+    <value>false</value>
+  </property>
+
+  <!-- MinIO (S3A) -->
+  <property>
+    <name>fs.s3a.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+  <!-- Trino/StarRocks 는 테이블 location 을 s3:// 스킴으로 쓴다. Hadoop 에는 s3 스킴
+       구현이 등록돼 있지 않아서, 매핑하지 않으면 CREATE SCHEMA 가
+       "Failed to create external path s3://... : null" 로 실패한다. -->
+  <property>
+    <name>fs.s3.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+  <property>
+    <name>fs.AbstractFileSystem.s3.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3A</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>http://minio:9000</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint.region</name>
+    <value>us-east-1</value>
+  </property>
+  <!-- MinIO 는 가상호스트 스타일(bucket.host)을 쓰지 않는다. 이 값을 빠뜨리면
+       UnknownHostException: lakehouse.minio 로 실패한다. -->
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>minio</value>
+  </property>
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>minio123</value>
+  </property>
+  <property>
+    <name>fs.s3a.aws.credentials.provider</name>
+    <value>org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider</value>
+  </property>
+
+</configuration>

@@ -1,0 +1,245 @@
+# =============================================================================
+# lakehouse-lab — Trino vs StarRocks 동일조건 비교 랩
+#
+#   MinIO(S3) ← Hive Metastore(+PostgreSQL) ← 동일한 Iceberg 카탈로그
+#                     ↑                              ↑
+#            Trino coordinator + worker      StarRocks FE + BE
+#
+# 이 파일을 직접 실행하지 말 것. bin/up.sh 가 versions.env + hive/hive<N>.env +
+# profiles/*.env 를 .env 로 합성한 뒤 실행한다.
+#
+# ★ 버전 분기를 이 파일에 두지 않는다. Hive 3/4 차이는 전부 conf/hms/hms-entrypoint.sh 가
+#   흡수하고, compose 와 metastore-site.xml 은 두 변형에서 완전히 동일하게 유지된다.
+#   분기가 여러 파일로 번지는 순간 "동일 조건 비교"라는 전제가 깨지기 때문이다.
+# =============================================================================
+name: lakehouse-lab
+
+services:
+
+  # --- 오브젝트 스토리지 ------------------------------------------------------
+  minio:
+    image: ${MINIO_IMAGE}
+    container_name: lab-minio
+    hostname: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+      MINIO_DOMAIN: minio
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # 콘솔 (minio / minio123)
+    volumes:
+      - minio-data:/data
+    mem_limit: ${MINIO_MEM}
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [lab]
+
+  # 버킷 생성 후 즉시 종료되는 1회성 잡
+  minio-init:
+    image: ${MC_IMAGE}
+    container_name: lab-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set lab http://minio:9000 "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}" &&
+        mc mb --ignore-existing "lab/${S3_BUCKET}" &&
+        echo "bucket ${S3_BUCKET} ready"
+    restart: "no"
+    networks: [lab]
+
+  # --- Hive Metastore 백엔드 DB ----------------------------------------------
+  hms-postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: lab-hms-postgres
+    hostname: hms-postgres
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    volumes:
+      - hms-pg-data:/var/lib/postgresql/data
+    mem_limit: ${PG_MEM}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [lab]
+
+  # --- Hive Metastore (Iceberg HiveCatalog) -----------------------------------
+  # 순정 apache/hive 이미지에는 hadoop-aws / aws-sdk / postgres-jdbc 가 없다.
+  # s3a:// 경로에서 ClassNotFoundException 으로 죽는 지점이라 별도로 굽는다.
+  hive-metastore:
+    build:
+      context: ./conf/hms
+      args:
+        HIVE_BASE_IMAGE: ${HIVE_BASE_IMAGE}
+        HIVE_MAJOR: ${HIVE_VARIANT}
+        CURL_IMAGE: ${CURL_IMAGE}
+        HADOOP_AWS_VERSION: ${HADOOP_AWS_VERSION}
+        AWS_SDK_BUNDLE_VERSION: ${AWS_SDK_BUNDLE_VERSION}
+        POSTGRES_JDBC_VERSION: ${POSTGRES_JDBC_VERSION}
+    # 이미지 태그에 hive 버전을 포함시킨다. hadoop-aws 버전만으로 태그를 만들면
+    # 변형을 오갈 때 엉뚱한 이미지가 재사용될 수 있다.
+    image: lakehouse-lab/hive-metastore:${HIVE_VERSION}-hadoop${HADOOP_AWS_VERSION}
+    # hive/hive3.env 는 linux/amd64 고정(arm64 매니페스트 없음),
+    # hive/hive4.env 는 멀티아치라 up.sh 가 호스트 아키텍처를 채운다.
+    platform: ${HMS_PLATFORM}
+    container_name: lab-hive-metastore
+    hostname: hive-metastore
+    depends_on:
+      hms-postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      HIVE_CUSTOM_CONF_DIR: /hive_custom_conf
+      HADOOP_HEAPSIZE: 512
+      # entrypoint 가 HADOOP_CLIENT_OPTS 에 "-Xmx1G $SERVICE_OPTS" 를 붙인다.
+      # SERVICE_OPTS 가 뒤에 오므로 여기서 준 -Xmx 가 최종값이 된다.
+      # 이걸 비워 두면 힙 1G > mem_limit 이 되어 컨테이너가 조용히 SIGKILL 된다.
+      SERVICE_OPTS: -Xmx${HMS_HEAP}
+    volumes:
+      - ./conf/hms/metastore-site.xml:/hive_custom_conf/metastore-site.xml:ro
+    ports:
+      - "9083:9083"
+    mem_limit: ${HMS_MEM}
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/localhost/9083' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks: [lab]
+
+  # --- Trino: coordinator 1 + worker 1 ----------------------------------------
+  trino-coordinator:
+    image: ${TRINO_IMAGE}
+    container_name: lab-trino-coordinator
+    hostname: trino-coordinator
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    environment:
+      # config.properties 안에서 ${ENV:...} 로 참조된다 (Trino 의 환경변수 치환 기능)
+      TRINO_QUERY_MAX_MEMORY: ${TRINO_QUERY_MAX_MEMORY}
+      TRINO_QUERY_MAX_MEMORY_PER_NODE: ${TRINO_QUERY_MAX_MEMORY_PER_NODE}
+    volumes:
+      - ./conf/trino/coordinator/config.properties:/etc/trino/config.properties:ro
+      - ./conf/trino/coordinator/node.properties:/etc/trino/node.properties:ro
+      # jvm.config 은 이미지 기본값을 그대로 쓴다(-XX:MaxRAMPercentage=80).
+      # 즉 힙 = mem_limit 의 80%. 힙을 바꾸려면 프로파일의 TRINO_COORD_MEM 을 조정할 것.
+      - ./conf/trino/catalog:/etc/trino/catalog:ro
+    ports:
+      - "8080:8080"   # Web UI / REST / JDBC
+    mem_limit: ${TRINO_COORD_MEM}
+    networks: [lab]
+
+  trino-worker:
+    image: ${TRINO_IMAGE}
+    container_name: lab-trino-worker
+    hostname: trino-worker
+    depends_on:
+      trino-coordinator:
+        condition: service_healthy
+    environment:
+      TRINO_QUERY_MAX_MEMORY: ${TRINO_QUERY_MAX_MEMORY}
+      TRINO_QUERY_MAX_MEMORY_PER_NODE: ${TRINO_QUERY_MAX_MEMORY_PER_NODE}
+    volumes:
+      - ./conf/trino/worker/config.properties:/etc/trino/config.properties:ro
+      - ./conf/trino/worker/node.properties:/etc/trino/node.properties:ro
+      - ./conf/trino/catalog:/etc/trino/catalog:ro
+    mem_limit: ${TRINO_WORKER_MEM}
+    networks: [lab]
+
+  # --- StarRocks: FE 1 + BE 1 (shared-nothing) --------------------------------
+  # CN 이 아니라 BE 를 쓰는 이유: Trino 의 coordinator+worker 와 프로세스 수가 대칭이고,
+  # plan/01 C-1(StarRocks 전용 스토리지 계층) 검증에 로컬 스토리지가 필요하기 때문.
+  # shared-data(CN) 비교가 필요해지면 별도 프로파일로 추가한다. plan/02 참조.
+  starrocks-fe:
+    image: ${STARROCKS_FE_IMAGE}
+    container_name: lab-starrocks-fe
+    hostname: starrocks-fe
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    command:
+      - /bin/bash
+      - -c
+      - |
+        cat /overrides/fe.conf >> /opt/starrocks/fe/conf/fe.conf
+        # 기본 JAVA_OPTS 의 -Xmx 만 교체한다(기본값 -Xmx8192m 은 이 컨테이너 한도를 넘는다).
+        # 줄 전체를 갈아끼우지 않는 이유: udf_security.policy, GC 로그 설정을 잃지 않기 위해.
+        sed -i -E 's/-Xmx[0-9]+[mMgG]/-Xmx${SR_FE_HEAP}/' /opt/starrocks/fe/conf/fe.conf
+        exec /opt/starrocks/fe/bin/start_fe.sh --host_type FQDN
+    volumes:
+      - ./conf/starrocks/fe.conf:/overrides/fe.conf:ro
+      - sr-fe-meta:/opt/starrocks/fe/meta
+    ports:
+      - "8030:8030"   # FE HTTP
+      - "9030:9030"   # MySQL 프로토콜
+    mem_limit: ${SR_FE_MEM}
+    healthcheck:
+      # /api/bootstrap 은 code 를 문자열("0")로 준다. status 로 판정할 것.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8030/api/bootstrap | grep -q '\"status\":\"OK\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [lab]
+
+  starrocks-be:
+    image: ${STARROCKS_BE_IMAGE}
+    container_name: lab-starrocks-be
+    hostname: starrocks-be
+    depends_on:
+      starrocks-fe:
+        condition: service_healthy
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ulimit -n 65535 || true
+        cat /overrides/be.conf >> /opt/starrocks/be/conf/be.conf
+        # BE 자체 메모리 상한. 프로파일 값이라 파일이 아니라 여기서 주입한다
+        # (be.conf 는 정적 파일이라 환경변수 치환이 안 된다). 반드시 mem_limit 보다 작아야 한다.
+        echo "mem_limit = ${SR_BE_MEM_LIMIT}" >> /opt/starrocks/be/conf/be.conf
+        until mysql -h starrocks-fe -P9030 -uroot -e "SELECT 1" >/dev/null 2>&1; do
+          echo "waiting for FE..."; sleep 2
+        done
+        mysql -h starrocks-fe -P9030 -uroot \
+          -e "ALTER SYSTEM ADD BACKEND \"starrocks-be:9050\"" 2>/dev/null || true
+        exec /opt/starrocks/be/bin/start_be.sh
+    volumes:
+      - ./conf/starrocks/be.conf:/overrides/be.conf:ro
+      - sr-be-storage:/opt/starrocks/be/storage
+    ports:
+      - "8040:8040"   # BE HTTP
+    mem_limit: ${SR_BE_MEM}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8040/api/health | grep -q OK"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [lab]
+
+volumes:
+  minio-data:
+  hms-pg-data:
+  sr-fe-meta:
+  sr-be-storage:
+
+networks:
+  lab:
+    name: lakehouse-lab
