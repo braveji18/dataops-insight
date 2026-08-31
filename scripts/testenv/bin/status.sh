@@ -71,7 +71,7 @@ echo
 if [ "$FAILED" -eq 0 ]; then
   lab_ok "GREEN — 비교 실험 가능"
   echo
-  echo "  Trino UI      http://localhost:8080"
+  echo "  Trino UI      http://localhost:${TRINO_HTTP_PORT:-8080}"
   echo "  StarRocks FE  http://localhost:8030   mysql -h127.0.0.1 -P9030 -uroot"
   echo "  MinIO 콘솔    http://localhost:9001   ($S3_ACCESS_KEY / $S3_SECRET_KEY)"
   exit 0

@@ -47,13 +47,16 @@ docker compose --env-file .env logs --tail 100 <서비스명>
 
 ## 리눅스에서만 나는 문제
 
-랩은 리눅스에서 실행 검증된 적이 없다(macOS arm64 에서 hive 3/4 모두 확인). 예상 지점:
+**linux/amd64 + hive 4 는 검증됐다** (2026-08-31, Docker 29.4.3 / Compose v5.1.3). 아래 중
+실제로 발생한 것은 포트 충돌 하나다. linux/arm64 와 linux + `--hive 3` 은 여전히 미검증.
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
+| **Trino 컨테이너만 bind 에러로 안 뜸** (실제 발생) | 호스트 8080 을 다른 도구가 점유. code-server 가 대표적이다 — 127.0.0.1:8080 에 물려 있어도 compose 의 0.0.0.0:8080 바인딩과 충돌한다 | `echo 'TRINO_HTTP_PORT=18080' > local.env && bin/up.sh`. `local.env` 는 gitignore 라 호스트에 남는다 |
+| **`lab-starrocks-fe exited (255)`, `docker logs` 는 비어 있음** (실제 발생) | **디스크 부족.** FE 는 meta dir 에 **5GB 이상 여유**를 요구하고, 없으면 `InvalidMetaDirException` 으로 즉시 죽는다. `up.sh` 에는 메모리 사전 검사만 있고 디스크 검사가 없어 원인과 동떨어진 증상으로 나타난다 | `df -h /` 먼저 확인. 로그는 stdout 이 아니라 컨테이너 안에 있다: `docker cp lab-starrocks-fe:/opt/starrocks/fe/log/fe.log - \| tar -xO \| tail`. 회수는 `docker system df` 로 대상 확인 후 `docker image rm` |
+| compose 가 포트 바인딩 에러로 죽음 | 9000/9001/8030/9030/9083/8040 중 충돌. 이들은 아직 변수화돼 있지 않다 | `ss -ltnp` 로 점유 프로세스 확인 후 정리 |
 | arm64 리눅스에서 `--hive 3` 이 `exec format error` | hive 3 은 amd64 단독 이미지인데 qemu binfmt 미등록. Docker Desktop 은 자동 제공하지만 네이티브 도커는 아니다 | `docker run --privileged --rm tonistiigi/binfmt --install amd64` |
 | 메모리 검사를 통과했는데 OOM | 리눅스 네이티브 도커에서 `docker info` 의 MemTotal 은 호스트 총 RAM 이라 다른 프로세스 몫이 빠지지 않는다 | 여유를 직접 확인하거나 더 작은 프로파일 사용 |
-| compose 가 포트 바인딩 에러로 죽음 | 8080/9000/9001/8030/9030/9083/8040 중 충돌. 사전 검사 없음 | `ss -ltnp` 로 점유 프로세스 확인 후 정리 |
 
 ## 상태가 꼬였을 때
 

@@ -104,6 +104,7 @@ queries/                  비교용 쿼리 (TPC-H Q1, 푸시다운 판별 등)
 bin/                      실행 스크립트
 results/                  bench 결과 JSON (gitignore)
 .env                      up.sh 생성물 (gitignore)
+local.env                 호스트 전용 override (선택, gitignore)
 ```
 
 ## 검증 현황
@@ -113,11 +114,43 @@ results/                  bench 결과 JSON (gitignore)
 | macOS arm64 / functional / hive 4 | ✅ 확인 (기동·시드·재기동 멱등성·행 수 일치) |
 | macOS arm64 / functional / hive 3 | ✅ 확인 (에뮬레이션) |
 | macOS arm64 / perf | 미검증 |
-| 리눅스 (x86 / arm) | 미검증 |
+| **linux/amd64 / functional / hive 4** | ✅ **확인 (2026-08-31)** — 기동·시드·재기동 멱등성·행 수 일치 |
+| **linux/amd64 / functional / hive 3** | ✅ **확인 (2026-08-31)** — 네이티브 (에뮬레이션 없음) |
+| linux/amd64 / perf | ❌ RAM 부족으로 불가 (아래) |
+| linux/arm64 | 미검증 |
 
-리눅스는 스크립트 수준에서는 대응돼 있으나(BSD/GNU 차이 회피, bash 3.2 문법) 실행한 적이
-없다. 특히 **리눅스 arm64 에서 `--hive 3` 은 qemu binfmt 등록이 별도로 필요하다** —
-Docker Desktop 은 자동 제공하지만 리눅스 네이티브 도커는 그렇지 않다.
+linux/amd64 는 qemu binfmt 가 **필요 없다.** hive 4 는 멀티아치라, hive 3 은 amd64 단독
+이미지인데 호스트가 amd64 라 — 양쪽 다 네이티브다. **hive 3 이 에뮬레이션 없이 도는 유일한
+검증 조합**이라 hive 3/4 간 성능 비교에도 쓸 수 있다(macOS arm64 에서는 불가). binfmt 문제는
+**리눅스 arm64 + `--hive 3`** 조합에 한정된다.
+
+`perf` 는 컨테이너 `mem_limit` 합계가 15.3GB 인데 검증 호스트는 RAM 15.6GB / **swap 0** 이라
+실행하지 않았다. `up.sh` 의 메모리 검사는 통과하지만(리눅스에서 `docker info` MemTotal 은
+호스트 총 RAM 이라 다른 프로세스 몫이 안 빠진다) 실제로는 OOM 이 난다. **RAM 24GB 이상 +
+swap 이 있는 호스트**가 필요하다.
+
+## 호스트 전용 설정 — `local.env`
+
+포트처럼 머신마다 달라야 하는 값은 `versions.env` 가 아니라 `local.env` 에 둔다
+(gitignore, 없으면 아무 영향 없음). `up.sh` 가 `.env` 를 만들 때 원본들 뒤에 붙인다.
+
+```bash
+# 예: 8080 을 다른 도구(code-server 등)가 쓰고 있을 때
+echo 'TRINO_HTTP_PORT=18080' > local.env && bin/up.sh
+```
+
+**8080 이 점유돼 있으면 Trino 컨테이너가 bind 에러로 아예 뜨지 못한다.** `up.sh` 에 사전
+검사가 없으므로, 기동이 이 지점에서 실패하면 `ss -ltn` 으로 포트부터 확인할 것.
+`bin/q.sh` 는 컨테이너 내부에서 실행되므로 이 포트와 무관하다 — 브라우저 접속용이다.
+
+## 기동 전 확인할 것 (사전 검사가 없는 항목)
+
+`up.sh` 는 메모리만 검사한다. 아래 둘은 검사하지 않으므로 실패가 엉뚱한 증상으로 나타난다.
+
+| 항목 | 필요치 | 확인 | 미달 시 증상 |
+|---|---|---|---|
+| **디스크** | StarRocks FE 가 meta dir 에 **5GB 이상** 요구 | `df -h /` | `lab-starrocks-fe exited (255)`, `docker logs` 는 **비어 있음**. 로그는 컨테이너 안 `fe/log/fe.log` 에 있다 |
+| **포트** | 8080/9000/9001/8030/9030/9083/8040 | `ss -ltn` | 해당 컨테이너만 bind 에러 |
 
 ## 주의
 

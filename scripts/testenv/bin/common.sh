@@ -5,7 +5,8 @@
 #   - macOS 기본 bash 는 3.2 다. 연관배열, ${var,,}, mapfile 등 4.x 문법은 쓰지 않는다.
 #   - BSD(macOS)와 GNU(리눅스)가 갈리는 명령은 쓰기 전에 판별한다. 현재 해당하는 것은
 #     date 뿐이고 lab_now_ms 가 처리한다. sed/grep 은 양쪽 공통 문법만 쓴다.
-#   - 검증 현황: macOS arm64 는 hive 3 / hive 4 모두 실행 확인. 리눅스는 미검증.
+#   - 검증 현황: macOS arm64 는 hive 3 / hive 4 모두 실행 확인.
+#     linux/amd64 + hive 4 확인(2026-08-31). linux/arm64 와 linux + hive 3 은 미검증.
 
 set -euo pipefail
 
@@ -60,13 +61,19 @@ lab_double_mem() {
 }
 
 # --- .env 합성 ----------------------------------------------------------------
-# 원본 3개를 합쳐 .env 를 만든다. .env 는 생성물이라 gitignore 대상이고,
+# 원본을 합쳐 .env 를 만든다. .env 는 생성물이라 gitignore 대상이고,
 # 손으로 고쳐도 다음 up.sh 에서 덮어써진다. 값을 바꾸려면 원본을 고칠 것.
 #
 #   versions.env        버전 기준선 (이미지 digest, 랩 고정 상수)
 #   hive/hive<N>.env    HMS 변형 (Hive 3 / 4 — 이미지, hadoop-aws, 아키텍처가 한 세트)
 #   profiles/<p>.env    자원·데이터 규모 (functional / perf)
+#   local.env           (선택) 호스트 전용 override — gitignore. 없으면 아무 영향 없다.
+#   셸 환경변수         최우선
 #                                                              → .env
+#
+# local.env 가 있는 이유: 포트처럼 **호스트 사정으로 갈리는 값**을 versions.env 에 넣으면
+# 커밋된 기준선이 특정 머신에 종속된다. 그렇다고 매번 셸에서 넘기면 한 번 빠뜨리는 순간
+# 기본값으로 렌더돼 조용히 깨진다(예: TRINO_HTTP_PORT 를 빠뜨리면 8080 bind 실패).
 lab_render_env() {
   local profile="$1" hive="${2:-4}"
   local pfile="$LAB_ROOT/profiles/${profile}.env"
@@ -105,6 +112,22 @@ lab_render_env() {
       echo "# 크게 뜬다. 실측: hive 3.1.3(amd64) on arm64 는 768m 한도에서 ObjectStore"
       echo "# 초기화 도중 SIGKILL(137). 프로파일 값의 2배를 준다."
       echo "HMS_MEM=$(lab_double_mem "$(sed -n 's/^HMS_MEM=//p' "$pfile" | tail -1)")"
+    fi
+
+    # 호스트 전용 override. .env 는 last-wins 로 읽히므로 원본들보다 뒤에 온다.
+    if [ -f "$LAB_ROOT/local.env" ]; then
+      echo
+      echo "# --- local.env (호스트 전용 override, 커밋 대상 아님) ---"
+      cat "$LAB_ROOT/local.env"
+    fi
+
+    # 셸 환경변수 override — 최우선. 렌더 시점에 .env 로 굳혀야 한다:
+    # lab_load_env 가 .env 를 source 하면서 셸 값을 덮어쓰기 때문에,
+    # 여기서 잡아두지 않으면 dc 가 .env 의 기본값을 보게 된다.
+    if [ -n "${TRINO_HTTP_PORT:-}" ]; then
+      echo
+      echo "# 셸 환경변수로 덮어쓴 값 (TRINO_HTTP_PORT=$TRINO_HTTP_PORT bin/up.sh)"
+      echo "TRINO_HTTP_PORT=${TRINO_HTTP_PORT}"
     fi
   } > "$LAB_ENV_FILE"
 

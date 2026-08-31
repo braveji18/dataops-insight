@@ -141,7 +141,9 @@ services:
       # 즉 힙 = mem_limit 의 80%. 힙을 바꾸려면 프로파일의 TRINO_COORD_MEM 을 조정할 것.
       - ./conf/trino/catalog:/etc/trino/catalog:ro
     ports:
-      - "8080:8080"   # Web UI / REST / JDBC
+      # 호스트 포트만 변수다(컨테이너 안은 8080 고정 — config.properties 가 8080 을 쓴다).
+      # 8080 은 흔한 개발 도구(code-server 등)와 겹친다. versions.env 의 TRINO_HTTP_PORT 참조.
+      - "${TRINO_HTTP_PORT:-8080}:8080"   # Web UI / REST / JDBC
     mem_limit: ${TRINO_COORD_MEM}
     networks: [lab]
 
