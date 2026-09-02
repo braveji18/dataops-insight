@@ -4,6 +4,20 @@
 > 본문: `docs/A-2-01-조인-순서-결정.md`
 > 일자: 2026-08-31
 
+> ---
+> ## ⚠ 정정됨 (2026-09-03)
+>
+> **아래의 관찰은 사실이지만 원인 귀속이 틀렸다.** 관찰된 left-deep 플랜은 임계값
+> (`cbo_max_reorder_node_use_exhaustive`) 때문이 아니라 **StarRocks 쪽 컬럼 통계가 완전하지
+> 않았기 때문**이다. 통계가 완전하면 기본 임계값에서도 StarRocks는 bushy 플랜을 만들고,
+> 그 트리는 Trino와 동일했다.
+>
+> 재실측과 2×2 교차 판별: `docs/evidence/A-2/20260903-cost-model-probes.md` probe 3.
+> 본문 반영: `docs/A-2-01-조인-순서-결정.md` 4절.
+>
+> 이 파일은 **기록으로 남긴다** — 지우면 무엇을 왜 고쳤는지 추적할 수 없다.
+> ---
+
 ### 주장
 
 두 엔진 모두 CBO 조인 리오더를 하지만 **탐색 전략이 다르다.** Trino는 조인 개수가 한도(`max_reordered_joins`, 기본 8) 이하이면 항상 전수 열거(DP)를 돌린다. StarRocks는 inner/cross 조인 개수가 `cbo_max_reorder_node_use_exhaustive`(기본 **4**)를 넘으면 Cascades memo의 전수 탐색을 **포기하고** 휴리스틱 알고리즘(left-deep / DP / greedy) 결과를 후보로 쓴다.
