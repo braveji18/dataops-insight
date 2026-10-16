@@ -47,6 +47,61 @@
 | 배치 패키지 규모 | 블록 64파일 **13,754줄** | 컬럼 69파일 **16,364줄** |
 | 메모리 회계 | `getSizeInBytes` / `getRetainedSizeInBytes` | `container_memory_usage` + `reference_memory_usage` |
 
+```mermaid
+classDiagram
+    direction LR
+    class Page {
+        Trino · 배치
+        -Block[] blocks
+        -int positionCount
+        -long sizeInBytes 캐시
+        스키마를 들고 있지 않습니다
+    }
+    class Block {
+        <<sealed interface>>
+        +getSizeInBytes() 논리 크기
+        +getRetainedSizeInBytes() 붙잡은 크기
+    }
+    class DictionaryBlock {
+        인코딩이 타입입니다
+    }
+    class RunLengthEncodedBlock {
+        인코딩이 타입입니다
+    }
+    class ValueBlock {
+        <<interface>>
+        구현 11종
+        물리 레이아웃으로 나눕니다
+    }
+    class Chunk {
+        StarRocks · 배치
+        -Columns _columns
+        -map _slot_id_to_index
+        스키마와 slot 맵을 들고 다닙니다
+    }
+    class Column {
+        <<Cow 참조 카운트>>
+        구현 53종
+        타입으로 나눕니다
+        +memory_usage()
+    }
+    class NullableColumn {
+        NULL을 감싸는 래퍼입니다
+    }
+    class AdaptiveNullableColumn {
+        상태 5종으로 지연 물질화합니다
+    }
+    Page o-- Block : 배열로 보유
+    Block <|.. DictionaryBlock
+    Block <|.. RunLengthEncodedBlock
+    Block <|.. ValueBlock
+    Chunk o-- Column : 벡터로 보유
+    Column <|-- NullableColumn
+    NullableColumn <|-- AdaptiveNullableColumn
+```
+
+**무엇을 타입으로 승격시켰는지가 다릅니다.** Trino는 딕셔너리와 RLE를, StarRocks는 NULL과 상수를 승격시켰습니다.
+
 메모리 회계가 놀랍도록 비슷하게 갈라져 있습니다. 양쪽 모두 "논리 크기"와 "실제로 붙잡고 있는 크기"를 구분합니다. 같은 문제의식입니다. 데이터를 공유하면 중복 계산이 발생하므로, 그것을 따로 세지 않으면 메모리 회계가 크게 틀립니다.
 
 소유권 모델만 수단이 다릅니다. Trino의 블록은 **불변이고 GC가 수거**하며, StarRocks의 컬럼은 **참조 카운트 기반 copy-on-write**입니다. 참조자가 하나뿐이면 제자리에서 고치고 여럿이면 복사합니다. 같은 목표("공유하되 안전하게")를 서로 다른 수단으로 얻습니다.
@@ -110,6 +165,26 @@ private void updateBatchSize(int positionCount, long pageSize)
 
 [PageProcessor.java#L220-L231](https://github.com/trinodb/trino/blob/483/core/trino-main/src/main/java/io/trino/operator/project/PageProcessor.java#L220-L231)
 
+```mermaid
+flowchart TB
+    subgraph T["Trino : 바이트 예산을 목표로 삼고 행 수를 조절합니다"]
+        direction TB
+        TP["배치를 처리합니다"] --> TQ1{"출력 > 16MB"}
+        TQ1 -->|"참"| TH["배치 크기를 절반으로"]
+        TQ1 -->|"거짓"| TQ2{"출력 < 4MB<br/>AND 8192행 미만"}
+        TQ2 -->|"참"| TD["배치 크기를 두 배로"]
+        TQ2 -->|"거짓"| TK["유지합니다"]
+        TH --> TP
+        TD --> TP
+        TK --> TP
+    end
+    subgraph S["StarRocks : 행 수를 고정합니다"]
+        direction TB
+        SC["vector_chunk_size = 4096"] --> SU["BE 코드 246곳이 참조합니다"]
+        SU --> SF(["적응 로직이 없습니다<br/>사용자가 chunk_size로 돌립니다"])
+    end
+```
+
 **바이트가 목표이고 행 수는 그것을 맞추는 수단입니다.** 컬럼 폭이 제각각인 환경에서 "행 4,096개"가 어떤 때는 40KB, 어떤 때는 400MB가 되는 문제를 이렇게 피합니다.
 
 StarRocks는 반대입니다.
@@ -136,6 +211,31 @@ Trino는 **물리 레이아웃**으로 나눕니다. `BIGINT`와 `DOUBLE`이 같
 **이것은 취향이 아니라 언어 제약의 귀결입니다.** Java에서 타입마다 블록 클래스를 만들면 `Block.getLong()` 호출 지점이 megamorphic해져 JIT이 인라이닝을 포기합니다. C++ 템플릿은 반대로 컴파일 시점에 단형화되므로 타입마다 클래스를 만들어도 가상 호출이 늘지 않습니다.
 
 같은 구도가 연산자 층에서도 반복됩니다. 해시 조인의 조회표가 **2종 대 6종**입니다.
+
+```mermaid
+flowchart TB
+    subgraph T3["Trino : 클래스를 만들어냅니다"]
+        direction TB
+        TJ{"조인 키가<br/>8바이트 정수 하나입니까"}
+        TJ -->|"예"| TB2["BigintPagesHash<br/>해시는 계산합니다"]
+        TJ -->|"아니오"| TD2["DefaultPagesHash"]
+        TB2 --> TGEN["JoinCompiler가 키 조합마다<br/>비교·해시 바이트코드를<br/>런타임에 생성합니다"]
+        TD2 --> TGEN
+    end
+    subgraph S3["StarRocks : 클래스를 늘립니다"]
+        direction TB
+        SJ{"조인 키의<br/>성질"}
+        SJ -->|"일반"| S1["BucketChainedJoinHashMap"]
+        SJ -->|"선형 체이닝"| S2["LinearChainedJoinHashMap"]
+        SJ -->|"시간 근접 조인"| S3B["LinearChainedAsofJoinHashMap"]
+        SJ -->|"배열 첨자로 직접"| S4["DirectMappingJoinHashMap<br/>해시 계산이 없습니다"]
+        SJ -->|"좁은 범위 정수"| S5["RangeDirectMapping…"]
+        SJ -->|"좁고 조밀함"| S6["DenseRangeDirectMapping…"]
+        S4 --> SMF["JoinMatchFlag 4분류로<br/>프로브 루프를 갈아끼웁니다"]
+    end
+    classDef hot stroke-width:2px
+    class S4,TGEN hot
+```
 
 ```java
 // core/trino-main/src/main/java/io/trino/operator/join/JoinHashSupplier.java#L91-L94 @ 483
@@ -172,6 +272,32 @@ StarRocks는 키의 성질마다 전용 구현을 둡니다.
 
 **이 축에서는 StarRocks가 뚜렷하게 넓습니다.**
 
+```mermaid
+flowchart LR
+    MEM{"메모리가<br/>부족합니다"}
+    subgraph T4["Trino : 4계열"]
+        direction TB
+        TA2["해시 집계"]
+        TB3["정렬"]
+        TC2["윈도우 함수"]
+        TD3["조인"]
+    end
+    subgraph S4B["StarRocks : 12계열"]
+        direction TB
+        SA2["집계 4종<br/>블로킹 · 중복 제거 · 파티션 단위"]
+        SB2["정렬 2종"]
+        SC3["해시 조인 2종"]
+        SD4["중첩 루프 조인 2종"]
+        SE2["다중 소비 교환"]
+    end
+    MEM --> T4
+    MEM --> S4B
+    NL["등가 조건 없는 조인이<br/>메모리를 넘깁니다"] -->|"spill 경로가 없습니다<br/>쿼리가 실패합니다"| T4
+    NL -->|"spill합니다"| S4B
+    classDef gap stroke-width:2px
+    class SD4,SE2 gap
+```
+
 | | Trino 483 | StarRocks 4.0.14 |
 |---|---|---|
 | spill 가능 연산자 | **4계열** (해시 집계, 정렬, 윈도우, 조인) | **12계열** |
@@ -200,6 +326,25 @@ Trino 483은 **Java Vector API(`jdk.incubator.vector`)를 실제로 씁니다.**
 | 쓰는 곳 | 블록 직렬화 시 NULL 압축·확장, Parquet 비트 언패킹 | `exprs/`, `column/`, `storage/`, `util/` 연산 경로 전반 |
 | CPU 판별 | 런타임(`/proc/cpuinfo` 플래그 → `SimdCapability` 8종) | 컴파일 다중 버전 + 런타임 디스패치 |
 | 연산자·표현식 평가 | **바이트코드 생성 + JIT 자동 벡터화** (56파일 9,383줄) | **인트린식 직접 작성** |
+
+```mermaid
+flowchart TB
+    subgraph T["Trino : 데이터 경계에만 손으로 씁니다"]
+        direction TB
+        TI["파일에서 읽기"] -->|"Vector API<br/>Parquet 비트 언패킹"| TB4["블록 생성"]
+        TB4 --> TOP["연산자와 표현식 평가<br/>바이트코드 생성 9,383줄<br/>실제 벡터화는 JIT에 맡깁니다"]
+        TOP -->|"Vector API<br/>NULL 압축·확장"| TSER["직렬화"]
+    end
+    subgraph S["StarRocks : 연산 경로 전반에 직접 씁니다"]
+        direction TB
+        SI["파일에서 읽기<br/>formats/ 인트린식"] --> SCOL["column/ 인트린식<br/>필터·문자열·해시"]
+        SCOL --> SEXPR["exprs/ 인트린식<br/>표현식 평가"]
+        SEXPR --> SSTOR["storage/ 인트린식"]
+        SMV["multi_version.h<br/>SSE·AVX2·AVX512를 여러 벌 컴파일해<br/>런타임에 고릅니다"] -.- SCOL
+    end
+    classDef simd stroke-width:2px
+    class TI,TSER,SCOL,SEXPR simd
+```
 
 **차이는 "SIMD를 쓰는가"가 아니라 "어디까지 직접 쓰는가"입니다.** Trino는 데이터 경계(직렬화와 파일 디코딩)에만 손으로 쓴 SIMD를 두고, 연산 자체는 JIT에 맡깁니다. StarRocks는 필터와 해시, 표현식까지 직접 씁니다. StarRocks 쪽 `column/` 아래 5개 파일은 필터 적용, 문자열 처리, 해시 계산 같은 **핵심 경로**입니다.
 

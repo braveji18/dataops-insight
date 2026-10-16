@@ -13,6 +13,24 @@
 
 Trino에서 StarRocks로 SQL을 옮길 때 확인해야 할 항목을 위험도 순으로 정리했습니다. 상위 네 개는 **아무 경고 없이 결과가 달라지거나 성능이 조용히 나빠집니다.**
 
+```mermaid
+flowchart TB
+    MIG["Trino SQL을<br/>StarRocks로 옮깁니다"]
+    MIG --> SILENT{{"조용히 깨집니다<br/>쿼리가 성공하고 값이나 성능만 달라집니다"}}
+    MIG --> LOUD{{"오류로 드러납니다<br/>발견하면 고칠 수 있습니다"}}
+    SILENT --> S1["① 파이프 연산자<br/>'a' 파이프 'b' 가 NULL이 됩니다"]
+    SILENT --> S2["② 근사 집계 함수<br/>값이 약 2.7% 다릅니다"]
+    SILENT --> S3["③ timestamptz 컬럼<br/>스키마에서 구분되지 않습니다"]
+    SILENT --> S4["④ 날짜 함수로 감싼 술어<br/>프루닝이 사라집니다"]
+    LOUD --> L1["⑤ 예약어 99개"]
+    LOUD --> L2["⑥ 상관 서브쿼리 2종"]
+    LOUD --> L3["⑦ UUID 컬럼<br/>DESC는 성공하고 조회에서 실패합니다"]
+    classDef danger stroke-width:3px
+    classDef ok stroke-width:2px,stroke-dasharray:4 2
+    class SILENT,S1 danger
+    class LOUD ok
+```
+
 | 순위 | 항목 | 어떻게 드러나는가 |
 |---|---|---|
 | **1** | **`||` 연산자** | **오류 없이 `NULL`이 됩니다.** `'a' \|\| 'b'`가 `NULL`로 평가됩니다 |
@@ -49,6 +67,23 @@ Trino에서 StarRocks로 SQL을 옮길 때 확인해야 할 항목을 위험도 
 | Trino 483 | `ab` | 파싱 오류 | 해당 없음 |
 | StarRocks 4.0.14 (기본) | **`NULL`** | `1` | `0` |
 | StarRocks (`sql_mode='PIPES_AS_CONCAT'`) | `ab` | 미확인 | 미확인 |
+
+```mermaid
+flowchart TB
+    EXPR["'a' 파이프 파이프 'b'"]
+    EXPR --> TL["Trino 렉서"]
+    EXPR --> SL["StarRocks 렉서"]
+    TL --> TC["문자열 이어붙이기로 해석합니다"]
+    TC --> TR(["'ab'"])
+    SL --> SM{"sql_mode"}
+    SM -->|"기본값"| SO["논리 OR로 해석합니다"]
+    SM -->|"PIPES_AS_CONCAT"| SC["문자열 이어붙이기로 해석합니다"]
+    SO --> SB["문자열을 boolean으로<br/>캐스트하려 합니다"]
+    SB --> SR(["NULL · 오류도 경고도 없습니다"])
+    SC --> SR2(["'ab'"])
+    classDef danger stroke-width:3px
+    class SR danger
+```
 
 `1 || 0 = 1`이므로 **StarRocks 기본값에서 `||`는 논리 OR입니다.** 문자열은 boolean 캐스트에 실패해 `NULL`이 됩니다.
 
@@ -200,6 +235,19 @@ CREATE TABLE bench.typeprobe (
 | **상관 + `ORDER BY … LIMIT 1`** | **가능합니다** | **실패** |
 | **상관 EXISTS 안에 집계 + `HAVING`** | **실패** | **가능합니다** |
 
+```mermaid
+flowchart LR
+    SQ["상관 서브쿼리 15종"]
+    SQ --> B["12종 · 양쪽 모두 가능합니다<br/>스칼라 · EXISTS · IN · NOT IN · 중첩 · OR"]
+    SQ --> N["1종 · 양쪽 모두 실패합니다<br/>상관 + LIMIT 1"]
+    SQ --> T["1종 · Trino만 가능합니다<br/>상관 + ORDER BY ... LIMIT 1"]
+    SQ --> S["1종 · StarRocks만 가능합니다<br/>상관 EXISTS 안에 집계 + HAVING"]
+    classDef same stroke-width:2px
+    classDef flip stroke-width:3px
+    class B same
+    class T,S flip
+```
+
 **15종 가운데 12종이 같고 1종은 공통으로 실패하며 2종이 정반대입니다.** 우열이 없습니다.
 
 거부 메시지는 각각 `Given correlated subquery is not supported`와 `Not support the subquery!`입니다. **오류로 드러나므로 안전하지만, 어느 모양이 막히는지 미리 알 수 없으므로 전수 확인이 필요합니다.**
@@ -270,6 +318,22 @@ ERROR 1064 (HY000): parquet column reader: not supported convert from parquet
 ## 10. 이전 작업 순서
 
 위험도와 작업량을 함께 고려한 순서입니다.
+
+```mermaid
+flowchart TB
+    ST(["이전을 시작합니다"]) --> S1["① 파이프 연산자를 전수 검색합니다<br/>concat()으로 바꾸거나 sql_mode를 설정합니다"]
+    S1 --> S2["② 근사 집계 함수를 목록화하고<br/>허용 오차를 정합니다"]
+    S2 --> S3["③ 날짜 함수로 감싼 술어를<br/>범위 술어로 바꿉니다"]
+    S3 --> S4["④ 예약어 99개를 검색해<br/>컬럼명을 확인합니다"]
+    S4 --> S5["⑤ 상관 서브쿼리와 윈도우 쿼리를<br/>전수 실행합니다"]
+    S5 --> S6["⑥ 신규 테이블마다<br/>전 컬럼 SELECT를 돌립니다"]
+    S6 --> S7["⑦ timestamptz 컬럼을 문서화합니다"]
+    S7 --> END(["이전 완료"])
+    NOTE["① 만은 자동 검증이 불가능합니다<br/>목록이 필요합니다"] -.- S1
+    HM["호환 모드는 작업을 줄여 주지만<br/>대체하지 못합니다"] -.- S2
+    classDef manual stroke-width:3px
+    class S1 manual
+```
 
 1. **`||`를 전수 검색합니다.** `concat()`으로 바꾸거나 `sql_mode`를 설정합니다. **이 항목만은 자동 검증이 불가능합니다.**
 2. **근사 집계 함수를 목록화합니다.** 값이 달라지므로 허용 오차를 정해야 합니다.
