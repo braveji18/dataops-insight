@@ -1,0 +1,265 @@
+# Trino 482 Prometheus alert rules (P1 / P2 / P3)
+#
+# 전제
+#   - Trino 내장 OpenMetrics(/metrics)를 coordinator·worker 각각 scrape
+#   - job 라벨: coordinator = "trino-coordinator", worker = "trino-worker"
+#     (환경에 맞게 아래 job 값을 일괄 치환하세요)
+#   - 메트릭 이름은 JMX ObjectName → 언더스코어 변환 규칙 기준 추정치입니다.
+#     배포 전 `curl -H 'X-Trino-User: monitor' http://<coordinator>:8080/metrics` 로 확인하세요.
+#   - TaskExecutor / Hive metastore / GC / Spill / Runtime 메트릭은
+#     config.properties 의 openmetrics.jmx-object-names 에 추가해야 노출됩니다.
+#   - 디스크 알람은 node_exporter 가 필요합니다.
+#   - S3 503(throttling)은 로그 기반이므로 Loki 등 로그 알람으로 구성하세요 (여기선 제외).
+#
+# 임계값 출처: (presto) = PrestoDB 운영 가이드 값, (proposal) = 제안 시작값
+
+groups:
+
+  # ───────────────────────────── P1 : Critical ─────────────────────────────
+  - name: trino-p1-critical
+    rules:
+
+      - alert: TrinoCoordinatorDown
+        expr: up{job="trino-coordinator"} == 0
+        for: 1m   # (presto)
+        labels:
+          severity: critical
+          priority: P1
+        annotations:
+          summary: "Trino coordinator 다운 ({{ $labels.instance }})"
+          description: "coordinator /metrics scrape 실패가 1분 이상 지속. /v1/info/state, /v1/status 확인."
+
+      - alert: TrinoWorkersMassLoss
+        # 기대 노드 수 대신 최근 1일 최대 활성 노드 수 대비 80% 미만으로 판단.
+        # 오토스케일링 환경이면 고정값(예: < 16)으로 바꾸세요.
+        expr: |
+          trino_failuredetector_name_HeartbeatFailureDetector_ActiveCount
+            < 0.8 * max_over_time(trino_failuredetector_name_HeartbeatFailureDetector_ActiveCount[1d])
+        for: 5m   # (proposal)
+        labels:
+          severity: critical
+          priority: P1
+        annotations:
+          summary: "Trino 활성 노드가 평소 대비 80% 미만"
+          description: "현재 활성 노드 {{ $value }}개. worker 다운/네트워크 단절 확인."
+
+      - alert: TrinoClusterMemoryExhausted
+        expr: |
+          trino_memory_type_ClusterMemoryPool_name_general_FreeDistributedBytes
+            / trino_memory_type_ClusterMemoryPool_name_general_TotalDistributedBytes < 0.10
+        for: 10m  # (proposal)
+        labels:
+          severity: critical
+          priority: P1
+        annotations:
+          summary: "Trino 클러스터 메모리 여유 10% 미만"
+          description: "여유 비율 {{ $value | humanizePercentage }}. 대형 쿼리/리소스 그룹 한도 확인."
+
+      - alert: TrinoCoordinatorHeapCritical
+        expr: |
+          java_lang_type_Memory_HeapMemoryUsage_used{job="trino-coordinator"}
+            / java_lang_type_Memory_HeapMemoryUsage_max{job="trino-coordinator"} > 0.90
+        for: 2m   # (presto)
+        labels:
+          severity: critical
+          priority: P1
+        annotations:
+          summary: "Coordinator heap 사용률 90% 초과 ({{ $labels.instance }})"
+          description: "heap 사용률 {{ $value | humanizePercentage }}. Full GC/OOM 위험."
+
+  # ───────────────────────────── P2 : High ─────────────────────────────
+  - name: trino-p2-high
+    rules:
+
+      - alert: TrinoQueriesKilledOOM
+        expr: increase(trino_memory_name_ClusterMemoryManager_QueriesKilledDueToOutOfMemory[10m]) > 0
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "최근 10분 OOM으로 kill된 쿼리 발생"
+          description: "{{ $value }}건. query.max-memory, 리소스 그룹 설정 확인."
+
+      - alert: TrinoQueryFailureRateHigh
+        # 내부+외부 실패율 > 5% (최근 10분 시작 쿼리 10건 이상일 때만)
+        expr: |
+          (
+            increase(trino_execution_name_QueryManager_InternalFailures_TotalCount[10m])
+            + increase(trino_execution_name_QueryManager_ExternalFailures_TotalCount[10m])
+          )
+          / increase(trino_execution_name_QueryManager_StartedQueries_TotalCount[10m]) > 0.05
+          and increase(trino_execution_name_QueryManager_StartedQueries_TotalCount[10m]) > 10
+        for: 10m  # (proposal)
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "Trino 내부·외부 실패율 5% 초과"
+          description: "실패율 {{ $value | humanizePercentage }}. coordinator 로그와 커넥터/스토리지 상태 확인."
+
+      - alert: TrinoQueryQueueBacklog
+        expr: trino_execution_name_QueryManager_QueuedQueries > 20
+        for: 5m   # (presto)
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "Trino 대기 쿼리 20건 초과"
+          description: "대기 쿼리 {{ $value }}건. 리소스 그룹 concurrency/메모리 한도 확인."
+
+      - alert: TrinoWaitingForResourcesTooLong
+        expr: trino_execution_name_QueryManager_WaitingForResourcesMaxAgeInSeconds > 300
+        for: 5m   # (proposal)
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "리소스 대기 쿼리 최대 대기 5분 초과"
+          description: "최대 대기 {{ $value }}초."
+
+      - alert: TrinoHighGCOverhead
+        # GC 누적 시간(ms)의 초당 증가량 / 1000 = 초당 GC에 쓴 시간 비율
+        expr: |
+          sum by (job, instance) (
+            rate({__name__=~"java_lang_type_GarbageCollector_name_.*_CollectionTime"}[2m])
+          ) / 1000 > 0.20
+        for: 2m   # (presto 기준 20%, 지속시간은 proposal)
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "GC 오버헤드 20% 초과 ({{ $labels.instance }})"
+          description: "GC 시간 비율 {{ $value | humanizePercentage }}."
+
+      - alert: TrinoWorkerHeapPressure
+        expr: |
+          java_lang_type_Memory_HeapMemoryUsage_used{job="trino-worker"}
+            / java_lang_type_Memory_HeapMemoryUsage_max{job="trino-worker"} > 0.85
+        for: 15m  # (proposal)
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "Worker heap 사용률 85% 초과 ({{ $labels.instance }})"
+          description: "heap 사용률 {{ $value | humanizePercentage }}."
+
+      - alert: TrinoSpillSpike
+        expr: sum(rate(trino_spiller_name_SpillerFactory_TotalSpilledBytes[5m])) > 5242880
+        for: 2m   # (presto, ~5MB/s)
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "Trino spill 속도 5MB/s 초과"
+          description: "spill {{ $value | humanize1024 }}B/s. worker 메모리 압박 신호."
+
+      - alert: TrinoHiveMetastoreFailures
+        expr: |
+          sum(increase(trino_plugin_hive_metastore_thrift_type_ThriftHiveMetastore_name_hive_GetTable_TotalFailures_TotalCount[10m])) > 0
+        for: 5m   # (proposal)
+        labels:
+          severity: high
+          priority: P2
+        annotations:
+          summary: "Hive metastore GetTable 실패 발생"
+          description: "최근 10분 실패 {{ $value }}건. metastore 가용성 확인 (482는 장애 시 back-off 재시도)."
+
+  # ───────────────────────────── P3 : Warning ─────────────────────────────
+  - name: trino-p3-warning
+    rules:
+
+      - alert: TrinoInsufficientResourcesFailures
+        expr: increase(trino_execution_name_QueryManager_InsufficientResourcesFailures_TotalCount[10m]) > 0
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "리소스 부족으로 실패한 쿼리 발생"
+          description: "최근 10분 {{ $value }}건."
+
+      - alert: TrinoP95LatencyHigh
+        expr: trino_execution_name_QueryManager_ExecutionTime_FiveMinutes_P95 > 60000
+        for: 5m   # (presto, 60s)
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "쿼리 실행시간 P95 60초 초과"
+          description: "P95 {{ $value }}ms."
+
+      - alert: TrinoLatencyRegressionWoW
+        expr: |
+          trino_execution_name_QueryManager_ExecutionTime_FiveMinutes_P95
+            > 2 * (trino_execution_name_QueryManager_ExecutionTime_FiveMinutes_P95 offset 1w)
+        for: 15m  # (proposal)
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "쿼리 P95 지연이 지난주 동시간 대비 2배 이상"
+          description: "현재 P95 {{ $value }}ms."
+
+      - alert: TrinoWorkerDown
+        expr: up{job="trino-worker"} == 0
+        for: 5m   # (proposal; presto 는 1m)
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "Trino worker 다운 ({{ $labels.instance }})"
+          description: "worker /metrics scrape 실패 5분 이상."
+
+      - alert: TrinoSplitQueueGrowing
+        expr: |
+          sum(trino_execution_executor_name_TaskExecutor_WaitingSplits)
+            > 2 * sum(trino_execution_executor_name_TaskExecutor_WaitingSplits offset 1w)
+          and sum(trino_execution_executor_name_TaskExecutor_WaitingSplits) > 100
+        for: 15m  # (proposal)
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "대기 split이 지난주 대비 2배 이상"
+          description: "대기 split {{ $value }}개. worker CPU 포화/스큐 확인."
+
+      - alert: TrinoLeakedQueries
+        expr: trino_memory_name_ClusterMemoryManager_NumberOfLeakedQueries > 0
+        for: 5m   # (proposal)
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "메모리 누수 쿼리 감지"
+          description: "{{ $value }}건."
+
+      - alert: TrinoMemoryBlockedNodes
+        expr: trino_memory_type_ClusterMemoryPool_name_general_BlockedNodes > 0
+        for: 5m   # (proposal)
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "메모리가 차서 블록된 노드 존재"
+          description: "블록 노드 {{ $value }}개."
+
+      - alert: TrinoNodeDiskUsageHigh
+        # mountpoint 를 spill/로그 경로에 맞게 수정하세요.
+        expr: |
+          1 - node_filesystem_avail_bytes{mountpoint=~"/data/trino.*|/var/log.*", fstype!~"tmpfs|overlay"}
+            / node_filesystem_size_bytes{mountpoint=~"/data/trino.*|/var/log.*", fstype!~"tmpfs|overlay"} > 0.80
+        for: 10m  # (proposal)
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "Trino 노드 디스크 사용률 80% 초과 ({{ $labels.instance }} {{ $labels.mountpoint }})"
+          description: "사용률 {{ $value | humanizePercentage }}."
+
+      - alert: TrinoUnexpectedRestart
+        expr: resets(java_lang_type_Runtime_Uptime{job=~"trino-coordinator|trino-worker"}[15m]) > 0
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: "Trino 프로세스 재시작 감지 ({{ $labels.instance }})"
+          description: "최근 15분 내 JVM uptime 리셋. OOMKilled/배포 여부 확인."
